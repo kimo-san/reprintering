@@ -1,0 +1,34 @@
+{
+  "projectVersion": 2,
+  "files": [
+    "com.frogtosea.tinyPrint.apk"
+  ],
+  "treeExpansionsV2": [],
+  "codeData": {
+    "comments": [],
+    "renames": []
+  },
+  "openTabs": [
+    {
+      "type": "class",
+      "tabPath": "com.activity.PrintPreviewActivity",
+      "subPath": "java",
+      "caret": 298797,
+      "view": {
+        "x": 0,
+        "y": 77386
+      },
+      "active": true,
+      "pinned": false,
+      "bookmarked": false,
+      "hidden": false,
+      "previewTab": false
+    }
+  ],
+  "cacheDir": "C:\\Users\\Tetiana\\AppData\\Local\\skylot\\jadx\\cache\\projects\\com.frogtosea.tinyPrint-7c243254023f11254d8b3f89cadd66fe",
+  "enableLiveReload": false,
+  "searchHistory": [],
+  "searchResourcesFilter": "$TEXT",
+  "searchResourcesSizeLimit": 0,
+  "pluginOptions": {}
+}
