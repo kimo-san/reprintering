@@ -1,16 +1,13 @@
 import asyncio
-import platform
 import time
 import os
-import io
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
-
-import PIL
-from PIL import Image, ImageDraw ,ImageFont, ImageChops
-
-import matplotlib.pyplot as plt
+from PIL import Image
+def chunked(data, size):
+    for i in range(0, len(data), size):
+        yield data[i:i + size]
 
 # CRC8 table extracted from APK, pretty standard though
 crc8_table = [
@@ -86,8 +83,9 @@ PrinterCharacteristic = "0000AE01-0000-1000-8000-00805F9B34FB"
 PrintWidth = 384
 GrayModerationEnergy = 4715
 PrinterGrayscaleBlockHeight = 1
+PrinterGrayImageSpeed = 40
 PrinterMTU = 180
-PrintSpeed = 0.010
+PrinterInterval = 0.004
 
 def saveImage(image):
     image.save(os.path.abspath(os.path.dirname(__file__)) + "/CONV.png")
@@ -121,7 +119,7 @@ def getBwBitmapRow(y, image):
             bitmap += [0x00]
         pixel = image.getpixel((x, y)) # lower number - darker pixel
         bitmap[int(bit / k)] >>= 1
-        if (pixel < 0x80): # if pixel is dark, add it to result array
+        if (pixel < 0x80): # if pixel is dark, paste it to result array
             bitmap[int(bit / k)] |= 0x80
         bit += 1
     return bitmap
@@ -161,21 +159,21 @@ def toGrayPixelArray(image): # get row array of bytes, which are ready for print
         for x in range(image.width):
             pixelColor = image.getpixel((x, y))
             to16bit = int(pixelColor / (256.0 / grayscale_levels))
-            allowedColor = max(0, min(pixelColor, grayscale_levels))
+            allowedColor = max(0, min(to16bit, grayscale_levels))
 
             hex_string = hex_table[allowedColor]
             string_buffer = hex_string + string_buffer # little endian
 
             if len(string_buffer) == 2: # release byte
                 converted_pixels[start_offset] = bytearray.fromhex(string_buffer)[0]
-                start_offset +=1
+                start_offset += 1
                 string_buffer = ""
     
     return converted_pixels
 
 def separateToCommandBlocks(pixel_array, image): # structure row data for print
 
-    commands = []
+    commands = bytearray()
 
     print(pixel_array)
 
@@ -188,25 +186,32 @@ def separateToCommandBlocks(pixel_array, image): # structure row data for print
         start_pos = int(block_index * bytes_per_block)
         end_pos = int(bytes_per_block)
         block = pixel_array[start_pos : end_pos]
-        commands.append(block)
+        
+        #commands += formatMessage(DrawGrayBitmap, block)
+        #commands += formatMessage(FeedPaper, [0x01])
         
     return commands
 
-async def printGrayscale(cli, source_image): # print by block
+async def printGrayscale(cli, source_image): # separate commands to microblocks and send
     image = toGrayscale(source_image)
     saveImage(image)
-    print_blocks = separateToCommandBlocks(toGrayPixelArray(image), image)
-    print(len(print_blocks[0]))
-    for block_index in range(len(print_blocks)):
-        await SendToPrinter(cli, DrawGrayBitmap, print_blocks[block_index])
-        time.sleep(PrinterMTU)
+    data_blocks = separateToCommandBlocks(toGrayPixelArray(image), image)
+    done = 0
+    for block in chunked(data_blocks, PrinterMTU):
+        if done >= 2:
+            break
+        
+        print(len(block))
+        await cli.write_gatt_char(PrinterCharacteristic, block)
+        time.sleep(3)
+        
+        done += 1
+        
 
     
 #############################
 ########     MAIN    ########
 #############################
-
-
 
 async def drawTestPattern():
 
@@ -221,11 +226,13 @@ async def drawTestPattern():
         await SendToPrinter(cli, DrawingMode, [0])
         #await SendToPrinter(cli, RetractPaper, [100])
         
+        source_image = Image.open(ImageSource)
         try:
 
-            source_image = Image.open(ImageSource)
-            #await printGrayscale(cli, source_image)
-            await SendToPrinter(cli, DrawGrayBitmap, [])
+            await printGrayscale(cli, source_image)
+            
+        except Exception as e:
+            print(f"Exceptn while print: {e}")
                 
         finally:
             #await SendToPrinter(cli, FeedPaper, [100])
