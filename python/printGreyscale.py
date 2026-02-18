@@ -1,10 +1,14 @@
 import asyncio
-import time
 import os
 
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 from PIL import Image
+from lzallright import LZOCompressor
+
+lzo = LZOCompressor()
+
+
 def chunked(data, size):
     for i in range(0, len(data), size):
         yield data[i:i + size]
@@ -74,24 +78,26 @@ FeedPaper = 0xA1        # Data: Number of steps to go forward
 DrawBwBitmap = 0xA2     # Data: Line to draw (1bpp) 0 bit -> don't draw pixel, 1 bit -> draw pixel
 DrawGrayBitmap = 0xCF   # Data: Block of lines to draw (4bpp)
 DrawingMode = 0xBE      # Data: 1 for Text, 0 for Images
-SetEnergy = 0xAF        # Data: 1 - 0xFFFF ... Для установки мощности головки принтера
+SetEnergy = 0xAF        # Data: 1 - 0xFFFF
 SetQuality = 0xA4       # Data: 1 - 5
 
+# SENDER
+async def send_to_printer(cli, cmd, data):
+    await cli.write_gatt_char(PrinterCharacteristic, formatMessage(cmd, data))
+
+# PRINTER & PRINT OPTIONS
 ImageSource = os.path.abspath(os.path.dirname(__file__)) + "/im2.png"
 PrinterAddress = "0A:05:7E:C9:F5:A0"
 PrinterCharacteristic = "0000AE01-0000-1000-8000-00805F9B34FB"
 PrintWidth = 384
 GrayModerationEnergy = 4715
-PrinterGrayscaleBlockHeight = 1
+PrinterGrayscaleBlockHeight = 20
 PrinterGrayImageSpeed = 40
 PrinterMTU = 180
 PrinterInterval = 0.004
 
 def saveImage(image):
     image.save(os.path.abspath(os.path.dirname(__file__)) + "/CONV.png")
-
-async def SendToPrinter(client, command, data):
-    await client.write_gatt_char(PrinterCharacteristic, formatMessage(command, data))
 
 def getEnergy(concentration):
     defconcentrations = 4
@@ -101,40 +107,10 @@ def getEnergy(concentration):
     return list(byts)
 
 #############################
-######## 1 BPP PRINT ########
-#############################
-
-def toBw(image):
-    image = image.convert("1", dither=Image.FLOYDSTEINBERG)
-    height = int(image.height * (PrintWidth / image.width))
-    image = image.resize((PrintWidth, height), Image.Resampling.HAMMING)
-    return image
-
-def getBwBitmapRow(y, image):
-    bitmap = [] # byte array of pixels
-    bit = 0 # processing bit of image
-    k = 8 # byte length
-    for x in range(0, image.width):
-        if bit % k == 0: # add new byte
-            bitmap += [0x00]
-        pixel = image.getpixel((x, y)) # lower number - darker pixel
-        bitmap[int(bit / k)] >>= 1
-        if (pixel < 0x80): # if pixel is dark, paste it to result array
-            bitmap[int(bit / k)] |= 0x80
-        bit += 1
-    return bitmap
-
-async def printBw(cli, source_image): # final function. print by line
-    bw_image = toBw(source_image)
-    for y in range(bw_image.height): 
-        toDraw = getBwBitmapRow(y, bw_image)
-        await SendToPrinter(cli, DrawBwBitmap, toDraw)
-
-#############################
 ######## 4 BPP PRINT ########
 #############################
 
-grayscale_levels = 15 # zero based
+grayscale_levels = 16
 def toGrayscale(image): # convert image
     image = image.convert("L", dither=Image.FLOYDSTEINBERG)
     height = int(image.height * (PrintWidth / image.width))
@@ -157,11 +133,12 @@ def toGrayPixelArray(image): # get row array of bytes, which are ready for print
     for y in range(image.height):
         string_buffer = ""
         for x in range(image.width):
-            pixelColor = image.getpixel((x, y))
-            to16bit = int(pixelColor / (256.0 / grayscale_levels))
-            allowedColor = max(0, min(to16bit, grayscale_levels))
+            
+            actualPixelColor = image.getpixel((x, y))
+            to16bit = int(actualPixelColor // grayscale_levels)
+            printableColor = max(0, min(to16bit, grayscale_levels))
 
-            hex_string = hex_table[allowedColor]
+            hex_string = hex_table[printableColor]
             string_buffer = hex_string + string_buffer # little endian
 
             if len(string_buffer) == 2: # release byte
@@ -173,20 +150,22 @@ def toGrayPixelArray(image): # get row array of bytes, which are ready for print
 
 def separateToCommandBlocks(pixel_array, image): # structure row data for print
 
-    commands = bytearray()
+    commands = []
 
-    print(pixel_array)
-
-    halfwidth = image.width / 2
+    halfwidth = int(image.width // 2)
     rows_per_block = PrinterGrayscaleBlockHeight
-    bytes_per_block = halfwidth * rows_per_block
+    bytes_per_block = int(halfwidth * rows_per_block)
     block_count = int((image.height + 16) / rows_per_block)
 
     for block_index in range(block_count):
+        
         start_pos = int(block_index * bytes_per_block)
-        end_pos = int(bytes_per_block)
+        end_pos = start_pos + bytes_per_block
+        
         block = pixel_array[start_pos : end_pos]
-        commands.append(block)
+        compressed = lzo.compress(block)
+        commands.append(formatMessage(DrawGrayBitmap, compressed))
+        commands.append(formatMessage(FeedPaper, [40]))
         
     return commands
 
@@ -194,15 +173,13 @@ async def printGrayscale(cli, source_image): # separate commands to microblocks 
     image = toGrayscale(source_image)
     saveImage(image)
     data_blocks = separateToCommandBlocks(toGrayPixelArray(image), image)
-    done = 0
-    for block in chunked(data_blocks, PrinterMTU):
-        if done >= 2:
-            break
-        
-        print(len(block))
-        await cli.write_gatt_char(PrinterCharacteristic, block)
-        time.sleep(3)
-        
+    done = 0 # debug
+    
+    for block in range(1000):
+        plh = formatMessage(DrawGrayBitmap, [0xff]*100)
+        print(plh)
+        await cli.write_gatt_char(PrinterCharacteristic, plh)
+        print("sent")
         done += 1
         
 
@@ -219,27 +196,19 @@ async def drawTestPattern():
 
     async with BleakClient(device) as cli:
         
-        await SendToPrinter(cli, SetEnergy, getEnergy(3))
-        await SendToPrinter(cli, SetQuality, [5])
-        await SendToPrinter(cli, DrawingMode, [0])
-        #await SendToPrinter(cli, RetractPaper, [100])
+        await send_to_printer(cli, SetEnergy, getEnergy(3))
+        await send_to_printer(cli, DrawingMode, [0, 1])
+        await send_to_printer(cli, SetQuality, [5])
         
         source_image = Image.open(ImageSource)
         try:
-
             await printGrayscale(cli, source_image)
-            
-        except Exception as e:
-            print(f"Exceptn while print: {e}")
-                
         finally:
             #await SendToPrinter(cli, FeedPaper, [100])
             print("done.")
             
+            
 asyncio.run(drawTestPattern())
-
-
-
 
 
 
