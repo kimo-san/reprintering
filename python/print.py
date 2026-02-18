@@ -186,9 +186,7 @@ def separateToCommandBlocks(pixel_array, image): # structure row data for print
         start_pos = int(block_index * bytes_per_block)
         end_pos = int(bytes_per_block)
         block = pixel_array[start_pos : end_pos]
-        
-        #commands += formatMessage(DrawGrayBitmap, block)
-        #commands += formatMessage(FeedPaper, [0x01])
+        commands.append(block)
         
     return commands
 
