@@ -112,7 +112,7 @@ def getEnergy(concentration):
 
 grayscale_levels = 16
 def toGrayscale(image): # convert image
-    image = image.convert("L", dither=Image.FLOYDSTEINBERG)
+    image = image.convert("L", colors=8) # dither=Image.FLOYDSTEINBERG
     height = int(image.height * (PrintWidth / image.width))
     image = image.resize((PrintWidth, height), Image.Resampling.HAMMING)
     return image
@@ -153,7 +153,7 @@ def separateToCommandBlocks(pixel_array, image): # structure row data for print
     commands = []
 
     halfwidth = int(image.width // 2)
-    rows_per_block = PrinterGrayscaleBlockHeight
+    rows_per_block = 2#PrinterGrayscaleBlockHeight
     bytes_per_block = int(halfwidth * rows_per_block)
     block_count = int((image.height + 16) / rows_per_block)
 
@@ -163,9 +163,11 @@ def separateToCommandBlocks(pixel_array, image): # structure row data for print
         end_pos = start_pos + bytes_per_block
         
         block = pixel_array[start_pos : end_pos]
-        compressed = lzo.compress(block)
-        commands.append(formatMessage(DrawGrayBitmap, compressed))
-        commands.append(formatMessage(FeedPaper, [40]))
+        compressed = lzo.compress(bytes(block))
+        olen = len(block)
+        clen = len(compressed)
+        print(f"Original size: {olen}, compressed: {clen}")
+        commands.append(formatMessage(DrawGrayBitmap, list(compressed)))
         
     return commands
 
@@ -175,11 +177,11 @@ async def printGrayscale(cli, source_image): # separate commands to microblocks 
     data_blocks = separateToCommandBlocks(toGrayPixelArray(image), image)
     done = 0 # debug
     
-    for block in range(1000):
-        plh = formatMessage(DrawGrayBitmap, [0xff]*100)
-        print(plh)
-        await cli.write_gatt_char(PrinterCharacteristic, plh)
-        print("sent")
+    for block in data_blocks:
+        for chunk in chunked(block, 150):
+            await cli.write_gatt_char(PrinterCharacteristic, block)
+            asyncio.sleep(0.1)
+            print("sent")
         done += 1
         
 

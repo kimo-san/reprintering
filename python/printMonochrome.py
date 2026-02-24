@@ -37,6 +37,8 @@ def crc8(data):
         crc = crc8_table[(crc ^ byte) & 0xFF]
     return crc & 0xFF
 
+def pack_len(value):
+        return list(struct.pack("<H", len(value)))
 # General message format:  
 # Magic number: 2 bytes 0x51, 0x78
 # Command: 1 byte
@@ -47,15 +49,13 @@ def crc8(data):
 # CRC8 of Data: 1 byte
 # 0xFF
 def formatMessage(command, data):
-    data = ([ 0x51, 0x78 ]
+    cmd = ([ 0x51, 0x78 ]
             + [command]
-            + [0x00]
-            + [len(data)]
-            + [0x00]
+            + pack_len(data)
             + data
             + [crc8(data)]
             + [0xFF])
-    return bytes(data)
+    return bytes(cmd)
 
 
 # Commands
@@ -79,7 +79,7 @@ async def SendToPrinter(client, command, data):
 
 def getEnergy(concentration):
     defconcentrations = 4
-    d = GrayModerationEnergy
+    d = 4000 //GrayModerationEnergy
     value = int(d + ((concentration - defconcentrations) * 0.15 * d))
     byts = value.to_bytes(2, byteorder='big', signed=False)
     return list(byts)
@@ -108,8 +108,8 @@ def getMonochromeBitmapRow(y, image):
         bit += 1
     return bitmap
 
-async def printMonochrome(cli, source_image): # final function. print by line
-    bw_image = toMonochrome(source_image)
+async def printMonochrome(cli, image): # final function. print by line
+    bw_image = toMonochrome(image)
     for y in range(bw_image.height): 
         toDraw = getMonochromeBitmapRow(y, bw_image)
         await SendToPrinter(cli, DrawBwBitmap, toDraw)
@@ -117,6 +117,56 @@ async def printMonochrome(cli, source_image): # final function. print by line
 #############################
 ########     MAIN    ########
 #############################
+
+import minilzo as lzo
+import struct
+
+# General message format:  
+# Magic number: 2 bytes 0x51, 0x78
+# Command: 1 byte
+# 0x00
+# Command data length: 2 bytes
+# Original data length: 2 bytes
+# Compressed data length: 2 bytes
+# Data: Data Length bytes (big endian)
+# CRC8 of Data: 1 byte
+# 0xFF
+def formatCompressed(command, row_data):
+    
+    def pack(value):
+        return list(struct.pack("<H", value))
+    
+    compressed = list(lzo.compress(bytes(row_data)))
+    row_len = pack_len(row_data)
+    comp_len = pack_len(compressed)
+    
+    data_package = row_len + comp_len + compressed
+    
+    pkg_len = pack(len(bytes(data_package)))
+    cmd2 = ([ 0x51, 0x78 ]
+            + [command]
+            + [0x00]
+            + pkg_len
+            + data_package
+            + [crc8(data_package)]
+            + [0xFF])
+    print(cmd2)
+    return bytes(cmd2)
+                    
+    #data = ([ 0x51, 0x78 ]
+    #        + [command]
+    #        + [0x00]
+    #        + pack_len
+    #        + data_package
+    #        + [crc8(data_package)]
+    #        + [0xFF])
+    #print(data)
+    #return forms
+    
+
+
+async def SendToPrinterCompressed(client, command, row_data):
+    await client.write_gatt_char(PrinterCharacteristic, formatCompressed(command, row_data))
         
 async def drawTestPattern():
 
@@ -126,17 +176,44 @@ async def drawTestPattern():
 
     async with BleakClient(device) as cli:
         
-        await SendToPrinter(cli, SetEnergy, getEnergy(3))
+        await SendToPrinter(cli, SetEnergy, [0x10])
         await SendToPrinter(cli, SetQuality, [5])
-        await SendToPrinter(cli, DrawingMode, [0])
+        await SendToPrinter(cli, DrawingMode, [0x00, 0x01])
         
         source_image = Image.open(ImageSource)
+        await SendToPrinter(cli, RetractPaper, [48, 0x00])
+        
+        # TEST
+        #
+        # Paper move: A0(back), A1(forward)
+        # Energy set: AF
+        # Quality set: A4
+        # DrawingMode: 0xBE
+        # 1bpp: 0xA2, 0xBF
+        # 4bpp: 0xCF, compessed data only
+        #
+        
         
         try:
-            await printMonochrome(cli, source_image)
+            cmd = 0xCF
+            dotMatrix = [
+                    0x00, 0x11, 0x22, 0x33,
+                    0x44, 0x55, 0x66, 0x77,
+                    0x88, 0x99, 0xAA, 0xBB,
+                    0xCC, 0xDD, 0xEE, 0xFF
+                        ]
+            
+            for color in dotMatrix:
+                print(f"Testing command {cmd} for {color}")
+                data = [ color ] * int(PrintWidth)
+                for i in range(5):
+                    await SendToPrinterCompressed(cli, cmd, data)
+                time.sleep(0.04)
+           
+           #await printMonochrome(cli, source_image)
 
         finally:
-            await SendToPrinter(cli, FeedPaper, [100])
+            await SendToPrinter(cli, FeedPaper, [48, 0x00])
             print("done.")
             
             
