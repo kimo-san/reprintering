@@ -82,7 +82,7 @@ async def SendToPrinter(client, command, data):
 
 def getEnergy(concentration):
     defconcentrations = 4
-    d = 4000 //GrayModerationEnergy
+    d = 4000 // GrayModerationEnergy
     value = int(d + ((concentration - defconcentrations) * 0.15 * d))
     byts = value.to_bytes(2, byteorder='big', signed=False)
     return list(byts)
