@@ -1,17 +1,15 @@
-import asyncio
 import os
-
+import asyncio
+from asyncio import sleep
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 from PIL import Image
-from lzallright import LZOCompressor
+import minilzo
+import struct
 
-lzo = LZOCompressor()
-
-
-def chunked(data, size):
-    for i in range(0, len(data), size):
-        yield data[i:i + size]
+# Util to pack the value in exact 2 bytes
+def pack(value):
+    return list(struct.pack("<H", value))
 
 # CRC8 table extracted from APK, pretty standard though
 crc8_table = [
@@ -38,12 +36,6 @@ crc8_table = [
     0xde, 0xd9, 0xd0, 0xd7, 0xc2, 0xc5, 0xcc, 0xcb, 0xe6, 0xe1, 0xe8, 0xef,
     0xfa, 0xfd, 0xf4, 0xf3
 ]
-hex_table = {
-    0: "F", 1: "E", 2: "D", 3: "C",
-    4: "B", 5: "A", 6: "9", 7: "8",
-    8: "7", 9: "6", 10: "5", 11: "4",
-    12: "3", 13: "2", 14: "1", 15: "0"
-}
 
 def crc8(data):
     crc = 0
@@ -54,143 +46,125 @@ def crc8(data):
 # General message format:  
 # Magic number: 2 bytes 0x51, 0x78
 # Command: 1 byte
-# 0x00
-# Data length: 1 byte
-# 0x00
-# Data: Data Length bytes (big endian)
+# Magic number: 1 byte 0x00
+# Data length: 2 bytes (little endian)
+# Data: Data bytes (big endian)
 # CRC8 of Data: 1 byte
 # 0xFF
 def formatMessage(command, data):
     data = ([ 0x51, 0x78 ]
             + [command]
             + [0x00]
-            + [len(data)]
-            + [0x00]
+            + pack(len(bytes(data)))
             + data
             + [crc8(data)]
             + [0xFF])
     return bytes(data)
 
+# Send message using bluetooth
+async def send_to_printer(cli, cmd, data):
+    await cli.write_gatt_char(PrinterCharacteristic, formatMessage(cmd, data))
+    await sleep(0.01)
 
 # Commands
 RetractPaper = 0xA0     # Data: Number of steps to go back
 FeedPaper = 0xA1        # Data: Number of steps to go forward
-DrawBwBitmap = 0xA2     # Data: Line to draw (1bpp) 0 bit -> don't draw pixel, 1 bit -> draw pixel
-DrawGrayBitmap = 0xCF   # Data: Block of lines to draw (4bpp)
+DrawMonoBitmap = 0xA2   # Data: Line to draw (1bpp) 0 bit -> don't draw pixel, 1 bit -> draw pixel
+DrawGrayBitmap = 0xCF   # Data: Line to draw (4bpp) in compressed by minilzo format
 DrawingMode = 0xBE      # Data: 1 for Text, 0 for Images
 SetEnergy = 0xAF        # Data: 1 - 0xFFFF
 SetQuality = 0xA4       # Data: 1 - 5
 
-# SENDER
-async def send_to_printer(cli, cmd, data):
-    await cli.write_gatt_char(PrinterCharacteristic, formatMessage(cmd, data))
-
-# PRINTER & PRINT OPTIONS
-ImageSource = os.path.abspath(os.path.dirname(__file__)) + "/im2.png"
+# Printer specifications
 PrinterAddress = "0A:05:7E:C9:F5:A0"
 PrinterCharacteristic = "0000AE01-0000-1000-8000-00805F9B34FB"
 PrintWidth = 384
 GrayModerationEnergy = 4715
-PrinterGrayscaleBlockHeight = 20
-PrinterGrayImageSpeed = 40
-PrinterMTU = 180
 PrinterInterval = 0.004
-
-def saveImage(image):
-    image.save(os.path.abspath(os.path.dirname(__file__)) + "/CONV.png")
 
 def getEnergy(concentration):
     defconcentrations = 4
     d = GrayModerationEnergy
     value = int(d + ((concentration - defconcentrations) * 0.15 * d))
-    byts = value.to_bytes(2, byteorder='big', signed=False)
-    return list(byts)
+    bytees = value.to_bytes(2, byteorder='big', signed=False)
+    return list(bytees)
 
 #############################
 ######## 4 BPP PRINT ########
 #############################
 
-grayscale_levels = 16
-def toGrayscale(image): # convert image
-    image = image.convert("L", colors=8) # dither=Image.FLOYDSTEINBERG
-    height = int(image.height * (PrintWidth / image.width))
-    image = image.resize((PrintWidth, height), Image.Resampling.HAMMING)
-    return image
-
-def toGrayPixelArray(image): # get row array of bytes, which are ready for print
+async def printGreyscale(cli, image):
     
-    halfwidth = image.width / 2
-    start_offset = int(halfwidth * 16)
-
-    converted_pixels = [0x00]
-
-    array_size = int((image.height * halfwidth) + start_offset)
-    if array_size % 4 == 0:
-        converted_pixels *= array_size
-    else:
-        converted_pixels *= array_size + (array_size % 4)
+    image = convertImage(image)
+    image.save(os.path.abspath(os.path.dirname(__file__)) + "/CONV.png")
     
     for y in range(image.height):
-        string_buffer = ""
-        for x in range(image.width):
+        
+        bitmap = [] # byte array of pixels
+        current_byte = -1 # processing byte of result array
+        bit = 0 # processed number of bits in byte
+        byte_length = 8 # byte length
+        bpp = 4 # bits pro pixel
+        for x in range(0, image.width):
             
-            actualPixelColor = image.getpixel((x, y))
-            to16bit = int(actualPixelColor // grayscale_levels)
-            printableColor = max(0, min(to16bit, grayscale_levels))
-
-            hex_string = hex_table[printableColor]
-            string_buffer = hex_string + string_buffer # little endian
-
-            if len(string_buffer) == 2: # release byte
-                converted_pixels[start_offset] = bytearray.fromhex(string_buffer)[0]
-                start_offset += 1
-                string_buffer = ""
-    
-    return converted_pixels
-
-def separateToCommandBlocks(pixel_array, image): # structure row data for print
-
-    commands = []
-
-    halfwidth = int(image.width // 2)
-    rows_per_block = 2#PrinterGrayscaleBlockHeight
-    bytes_per_block = int(halfwidth * rows_per_block)
-    block_count = int((image.height + 16) / rows_per_block)
-
-    for block_index in range(block_count):
+            if bit % byte_length == 0: # go to new byte if current is full
+                bitmap += [0x00]
+                current_byte += 1
+                
+            pixel = 255 - image.getpixel((x, y)) >> 4 # lower number - darker pixel
+            
+            # reverse pixel order
+            if (bit % byte_length) == 0:
+                bitmap[current_byte] |= pixel
+            else:
+                bitmap[current_byte] |= (pixel << 4)
+            
+            bit += bpp
         
-        start_pos = int(block_index * bytes_per_block)
-        end_pos = start_pos + bytes_per_block
-        
-        block = pixel_array[start_pos : end_pos]
-        compressed = lzo.compress(bytes(block))
-        olen = len(block)
-        clen = len(compressed)
-        print(f"Original size: {olen}, compressed: {clen}")
-        commands.append(formatMessage(DrawGrayBitmap, list(compressed)))
-        
-    return commands
+        # send the complete row to printer
+        await send_to_printer(cli, DrawGrayBitmap, compressData(bitmap))
 
-async def printGrayscale(cli, source_image): # separate commands to microblocks and send
-    image = toGrayscale(source_image)
-    saveImage(image)
-    data_blocks = separateToCommandBlocks(toGrayPixelArray(image), image)
-    done = 0 # debug
-    
-    for block in data_blocks:
-        for chunk in chunked(block, 150):
-            await cli.write_gatt_char(PrinterCharacteristic, block)
-            asyncio.sleep(0.1)
-            print("sent")
-        done += 1
-        
+    return bitmap
 
+# Prints a small gradient
+async def testGreyscale():
+    dotMatrix = [
+            0x00, 0x11, 0x22, 0x33,
+            0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xAA, 0xBB,
+            0xCC, 0xDD, 0xEE, 0xFF
+                ]
+    for color in dotMatrix:
+        print(f"Testing command for {color}")
+        data = [ color ] * int(PrintWidth / 2)
+        for i in range(5):
+            await SendToPrinter(cli, DrawGrayBitmap, compressData(data))
+
+# Compressed data format:
+# Decompressed package length: 2 bytes
+# Compressed package length: 2 bytes
+# Compressed data
+def compressData(row_data):
+    compressed_data = list(minilzo.compress(bytes(row_data)))
+    data_package = (pack(len(row_data))
+                    + pack(len(compressed_data))
+                    + compressed_data)
+    return data_package
+
+def convertImage(image):
+    image = image.convert("L", dither=Image.FLOYDSTEINBERG) # to grayscale
+    height = int(image.height * (PrintWidth / image.width)) # save image ratio
+    image = image.resize((PrintWidth, height), Image.Resampling.HAMMING) # resize keepting origimal image ratio
+    return image
     
 #############################
 ########     MAIN    ########
 #############################
 
-async def drawTestPattern():
+ImageSource = os.path.abspath(os.path.dirname(__file__)) + "/meme1.jpg"
+async def main():
+    
+    source_image = Image.open(ImageSource)
 
     device = await BleakScanner.find_device_by_address(PrinterAddress, timeout=20.0)
     if not device:
@@ -201,16 +175,10 @@ async def drawTestPattern():
         await send_to_printer(cli, SetEnergy, getEnergy(3))
         await send_to_printer(cli, DrawingMode, [0, 1])
         await send_to_printer(cli, SetQuality, [5])
-        
-        source_image = Image.open(ImageSource)
-        try:
-            await printGrayscale(cli, source_image)
-        finally:
-            #await SendToPrinter(cli, FeedPaper, [100])
-            print("done.")
+        await printGreyscale(cli, source_image)
+        await send_to_printer(cli, FeedPaper, [100])    
             
-            
-asyncio.run(drawTestPattern())
+asyncio.run(main())
 
 
 
