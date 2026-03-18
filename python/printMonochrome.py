@@ -68,7 +68,7 @@ DrawingMode = 0xBE      # Data: 1 for Text, 0 for Images
 SetEnergy = 0xAF        # Data: 1 - 0xFFFF
 SetQuality = 0xA4       # Data: 1 - 5
 
-ImageSource = os.path.abspath(os.path.dirname(__file__)) + "/im2.png"
+ImageSource = os.path.abspath(os.path.dirname(__file__)) + "/robl.png"
 PrinterAddress = "0A:05:7E:C9:F5:A0"
 PrinterCharacteristic = "0000AE01-0000-1000-8000-00805F9B34FB"
 PrintWidth = 384
@@ -78,7 +78,6 @@ def saveImage(image):
 
 async def SendToPrinter(client, command, data):
     await client.write_gatt_char(PrinterCharacteristic, formatMessage(command, data))
-    print(f"Sent: {command}, {data}")
 
 def getEnergy(concentration):
     defconcentrations = 4
@@ -92,7 +91,7 @@ def getEnergy(concentration):
 #############################
 
 def toMonochrome(image):
-    image = image.convert("1", dither=Image.FLOYDSTEINBERG)
+    image = image.convert("1")
     height = int(image.height * (PrintWidth / image.width))
     image = image.resize((PrintWidth, height), Image.Resampling.HAMMING)
     return image
@@ -106,7 +105,7 @@ def getMonochromeBitmapRow(y, image):
             bitmap += [0x00]
         pixel = image.getpixel((x, y)) # lower number - darker pixel
         bitmap[int(bit / k)] >>= 1
-        if (pixel < 0x80): # if pixel is dark, paste it to result array
+        if (pixel == 0x00): # if pixel is dark, paste it to result array
             bitmap[int(bit / k)] |= 0x80
         bit += 1
     return bitmap
@@ -116,7 +115,7 @@ async def printMonochrome(cli, image): # final function. print by line
     saveImage(bw_image)
     for y in range(bw_image.height): 
         toDraw = getMonochromeBitmapRow(y, bw_image)
-        #await SendToPrinter(cli, DrawBwBitmap, toDraw)
+        await SendToPrinter(cli, DrawBwBitmap, toDraw)
     
 #############################
 ########     MAIN    ########
@@ -130,14 +129,14 @@ async def drawTestPattern():
 
     async with BleakClient(device) as cli:
         
-        await SendToPrinter(cli, SetEnergy, [0x10])
+        await SendToPrinter(cli, SetEnergy, [0xff, 0xff])
         await SendToPrinter(cli, SetQuality, [5])
         await SendToPrinter(cli, DrawingMode, [0, 0])
         source_image = Image.open(ImageSource)
         await printMonochrome(cli, source_image)
         await SendToPrinter(cli, FeedPaper, [48])
             
-            
+ 
 asyncio.run(drawTestPattern())
 
 

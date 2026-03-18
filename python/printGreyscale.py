@@ -63,8 +63,9 @@ def formatMessage(command, data):
 
 # Send message using bluetooth
 async def send_to_printer(cli, cmd, data):
-    await cli.write_gatt_char(PrinterCharacteristic, formatMessage(cmd, data))
-    await sleep(0.01)
+    dat = formatMessage(cmd, data)
+    print(dat)
+    await cli.write_gatt_char(PrinterCharacteristic, dat)
 
 # Commands
 RetractPaper = 0xA0     # Data: Number of steps to go back
@@ -77,7 +78,9 @@ SetQuality = 0xA4       # Data: 1 - 5
 
 # Printer specifications
 PrinterAddress = "0A:05:7E:C9:F5:A0"
-PrinterCharacteristic = "0000AE01-0000-1000-8000-00805F9B34FB"
+PrinterCharacteristic = "0000ae10-0000-1000-8000-00805f9b34fb" # "0000ae03-0000-1000-8000-00805f9b34fb" # "0000AE01-0000-1000-8000-00805F9B34FB"
+#public static final UUID[] writeUUid = {UUID.fromString("0000AE01-0000-1000-8000-00805F9B34FB"), UUID.fromString("0000FF02-0000-1000-8000-00805F9B34FB"), UUID.fromString("0000AB01-0000-1000-8000-00805F9B34FB")};
+#public static final UUID[] serviceUUID = {UUID.fromString("0000AE00-0000-1000-8000-00805F9B34FB"), UUID.fromString("0000FF00-0000-1000-8000-00805F9B34FB"), UUID.fromString("0000AB00-0000-1000-8000-00805F9B34FB")};
 PrintWidth = 384
 GrayModerationEnergy = 4715
 PrinterInterval = 0.004
@@ -93,12 +96,12 @@ def getEnergy(concentration):
 ######## 4 BPP PRINT ########
 #############################
 
-async def printGreyscale(cli, image):
+async def printGreyscale(cli, image, release_row):
     
     image = convertImage(image)
     image.save(os.path.abspath(os.path.dirname(__file__)) + "/CONV.png")
     
-    for y in range(image.height):
+    for y in range(int(image.height)):
         
         bitmap = [] # byte array of pixels
         current_byte = -1 # processing byte of result array
@@ -122,12 +125,12 @@ async def printGreyscale(cli, image):
             bit += bpp
         
         # send the complete row to printer
-        await send_to_printer(cli, DrawGrayBitmap, compressData(bitmap))
+        await release_row(bitmap)
 
     return bitmap
 
 # Prints a small gradient
-async def testGreyscale():
+async def testGreyscale(cli):
     dotMatrix = [
             0x00, 0x11, 0x22, 0x33,
             0x44, 0x55, 0x66, 0x77,
@@ -138,7 +141,7 @@ async def testGreyscale():
         print(f"Testing command for {color}")
         data = [ color ] * int(PrintWidth / 2)
         for i in range(5):
-            await SendToPrinter(cli, DrawGrayBitmap, compressData(data))
+            await send_to_printer(cli, DrawGrayBitmap, compressData(data))
 
 # Compressed data format:
 # Decompressed package length: 2 bytes
@@ -172,12 +175,19 @@ async def main():
 
     async with BleakClient(device) as cli:
         
-        await send_to_printer(cli, SetEnergy, getEnergy(3))
-        await send_to_printer(cli, DrawingMode, [0, 1])
+        lev = 0x8000
+        await send_to_printer(cli, SetEnergy, [(lev >> 8) & 0xFF, lev & 0xFF])
+        await send_to_printer(cli, DrawingMode, [0x00, 0x01])
         await send_to_printer(cli, SetQuality, [5])
-        await printGreyscale(cli, source_image)
-        await send_to_printer(cli, FeedPaper, [100])    
-            
+        
+        release_row = lambda formated_row: send_to_printer(cli, DrawGrayBitmap, compress(formated_row))
+        await printGreyscale(cli, source_image, release_row)
+        
+        await send_to_printer(cli, FeedPaper, [100])
+                
+                
+                
+        
 asyncio.run(main())
 
 
